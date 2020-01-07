@@ -15,9 +15,9 @@ namespace Pixie.Unity
 
         public void Send(object message) {
             JObject obj = JObject.FromObject(new Dictionary<string, object>() {
-            { PXUnityMessageInfo.MESSAGE_SERIALIZATION_FIELD_NAME, PXUnityMessageInfo.GetMessageTypeHashCode(message.GetType()) },
-            { PXUnityMessageInfo.MESSAGE_SERIALIZATION_FIELD_BODY, message }
-        });
+                { PXUnityMessageInfo.MESSAGE_SERIALIZATION_FIELD_NAME, PXUnityMessageInfo.GetMessageTypeHashCode(message.GetType()) },
+                { PXUnityMessageInfo.MESSAGE_SERIALIZATION_FIELD_BODY, message }
+            });
 
             string objAsString = obj.ToString(Newtonsoft.Json.Formatting.None);
 
