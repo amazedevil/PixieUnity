@@ -19,25 +19,32 @@ namespace Pixie.Unity
         [SerializeField]
         private int serverPort;
 
+        [SerializeField]
+        private bool autoSearchEventHandlers = true;
+
+        [SerializeField]
+        private GameObject[] eventKeepingGameObjects;
+
         private TcpClient socketConnection = null;
         private NetworkStream networkStream = null;
         private PXUnityMessageReader reader = null;
         private PXUnityMessageWriter writer = null;
 
-        [SerializeField]
-        private GameObject[] eventKeepers;
-
         private PXUnityMessageHandlerRawBase[] events;
 
         private void Awake() {
-            if (eventKeepers.Length == 0) {
-                eventKeepers = new GameObject[] { this.gameObject };
-            }
+            if (autoSearchEventHandlers) {
+                events = UnityEngine.Object.FindObjectsOfType<PXUnityMessageHandlerRawBase>();
+            } else {
+                if (eventKeepingGameObjects.Length == 0) {
+                    eventKeepingGameObjects = new GameObject[] { this.gameObject };
+                }
 
-            events = eventKeepers
-                .Select(ek => ek.GetComponents<PXUnityMessageHandlerRawBase>())
-                .SelectMany(mh => mh)
-                .ToArray();
+                events = eventKeepingGameObjects
+                    .Select(ek => ek.GetComponents<PXUnityMessageHandlerRawBase>())
+                    .SelectMany(mh => mh)
+                    .ToArray();
+            }
 
             StartCoroutine(StartDataStreamPreparing());
         }
