@@ -14,10 +14,10 @@ namespace Pixie.Unity
         private ConcurrentQueue<Action> sendingQueue = new ConcurrentQueue<Action>();
 
         [SerializeField]
-        private string serverHost;
+        private string serverHost = "localhost";
 
         [SerializeField]
-        private int serverPort;
+        private int serverPort = 7777;
 
         [SerializeField]
         private bool autoSearchEventHandlers = true;
