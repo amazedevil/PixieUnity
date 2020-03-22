@@ -7,11 +7,9 @@ using System.Linq;
 
 namespace Pixie.Unity
 {
-    public class PXUnityClient : MonoBehaviour
+    public class PXUnityClient : MonoBehaviour, IPXProtocolContact
     {
         private const int RECONNECTION_DELAY = 5000;
-
-        private ConcurrentQueue<Action> sendingQueue = new ConcurrentQueue<Action>();
 
         [SerializeField]
         private string serverHost = "localhost";
@@ -25,32 +23,42 @@ namespace Pixie.Unity
         [SerializeField]
         private GameObject[] eventKeepingGameObjects;
 
-        private TcpClient socketConnection = null;
-        private NetworkStream networkStream = null;
-        private PXUnityMessageReader reader = null;
-        private PXUnityMessageWriter writer = null;
+        [SerializeField]
+        private PXProtocolBase protocol = null;
 
-        private PXUnityMessageHandlerRawBase[] events;
+        private TcpClient socketConnection = null;
+        private PXUnityMessageEncoder encoder = null;
+        private PXUnityMessageHandlerRawBase[] handlers;
+        private ConcurrentQueue<Action> mainThreadActionQueue = new ConcurrentQueue<Action>();
 
         private void Awake() {
+            if (protocol == null) {
+                protocol = this.gameObject.AddComponent<PXReliableDeliveryProtocol>();
+            }
+
             if (autoSearchEventHandlers) {
-                events = UnityEngine.Object.FindObjectsOfType<PXUnityMessageHandlerRawBase>();
+                handlers = UnityEngine.Object.FindObjectsOfType<PXUnityMessageHandlerRawBase>();
             } else {
                 if (eventKeepingGameObjects.Length == 0) {
                     eventKeepingGameObjects = new GameObject[] { this.gameObject };
                 }
 
-                events = eventKeepingGameObjects
+                handlers = eventKeepingGameObjects
                     .Select(ek => ek.GetComponents<PXUnityMessageHandlerRawBase>())
                     .SelectMany(mh => mh)
                     .ToArray();
             }
 
+            this.encoder = new PXUnityMessageEncoder(handlers.Select(x => x.DataType).ToArray());
+            this.protocol.Initialize(this);
+
             StartCoroutine(StartDataStreamPreparing());
         }
 
         private void FixedUpdate() {
-            ProcessDataStream();
+            while (mainThreadActionQueue.TryDequeue(out Action action)) {
+                action();
+            }
         }
 
         private void OnDestroy() {
@@ -66,9 +74,8 @@ namespace Pixie.Unity
         private bool PrepareDataStream() {
             try {
                 socketConnection = new TcpClient(serverHost, serverPort);
-                networkStream = socketConnection.GetStream();
-                reader = new PXUnityMessageReader(networkStream, events.Select(x => x.DataType).ToArray());
-                writer = new PXUnityMessageWriter(networkStream);
+                protocol.SetupStreams(socketConnection.GetStream());
+
                 return true;
             } catch (Exception e) {
                 FinalizeDataStream();
@@ -79,44 +86,12 @@ namespace Pixie.Unity
         }
 
         private void FinalizeDataStream() {
-            reader = null;
-            writer = null;
-            networkStream?.Dispose();
-            networkStream = null;
             socketConnection?.Close();
             socketConnection = null;
         }
 
-        private void ProcessDataStream() {
-            if (reader == null) {
-                return;
-            }
-
-            try {
-                reader.Update();
-
-                if (reader.HasMessage) {
-                    ProcessCommand(reader.DequeueMessage());
-                }
-
-                Action sendingAction;
-
-                while (sendingQueue.TryDequeue(out sendingAction)) {
-                    sendingAction();
-                }
-            } catch (SocketException se) {
-                Debug.LogError(se);
-                FinalizeDataStream();
-                StartCoroutine(StartDataStreamPreparing());
-            }
-        }
-
         public void SendMessage(object message) {
-            sendingQueue.Enqueue(delegate {
-                Debug.Log("Sending message: " + message.GetType().Name);
-
-                writer.Send(message);
-            });
+            this.protocol.SendMessage(encoder.EncodeMessage(message));
         }
 
         private void ProcessCommand(object message) {
@@ -124,12 +99,35 @@ namespace Pixie.Unity
 
             Debug.Log("Message received: " + messageType.ToString());
 
-            foreach (var e in events) {
-                if (e.DataType == messageType) {
-                    e.SetupData(message).Execute();
+            foreach (var eh in handlers) {
+                if (eh.DataType == messageType) {
+                    eh.SetupData(message).Execute();
                 }
             }
         }
 
+        public void RequestReconnect() {
+            FinalizeDataStream();
+            mainThreadActionQueue.Enqueue(delegate {
+                StartCoroutine(StartDataStreamPreparing());
+            });
+        }
+
+        public void ReceivedMessage(byte[] message) {
+            var decoded = this.encoder.DecodeMessage(message);
+            mainThreadActionQueue.Enqueue(delegate {
+                ProcessCommand(decoded);
+            });
+        }
+
+        public void ClientDisconnected() {
+            //do nothing
+        }
+
+        public void ClientException(Exception e) {
+            mainThreadActionQueue.Enqueue(delegate {
+                Debug.LogError(e);
+            });
+        }
     }
 }
