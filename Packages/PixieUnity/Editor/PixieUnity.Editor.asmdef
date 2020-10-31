@@ -1,0 +1,17 @@
+{
+    "name": "PixieUnityEditor",
+    "references": [
+        "GUID:88b020e39ebb21742bc43401ac7b4e83"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

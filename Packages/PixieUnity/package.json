@@ -1,0 +1,11 @@
+{
+    "name": "com.cpiteam.pixieunity",
+    "displayName": "PixieUnity",
+    "version": "0.9.0",
+    "unity": "2019.4",
+    "description": "Pixie client library",
+    "license": "MIT",
+    "dependencies": {
+    	"com.unity.nuget.newtonsoft-json": "2.0.0"
+    }
+}
