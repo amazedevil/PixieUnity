@@ -8,6 +8,7 @@ using UnityEngine.Events;
 using System.Threading.Tasks;
 using System.Threading;
 using System.Net;
+using Pixie.Core.Exceptions;
 
 namespace Pixie.Unity
 {
@@ -15,6 +16,15 @@ namespace Pixie.Unity
     {
         [Serializable]
         public class ConnectedEvent : UnityEvent<bool> { }
+
+        public class ConnectionException : Exception
+        {
+            public ConnectionException(Exception innerException) : base("Server connection exception", innerException) { }
+        }
+        public class CanceledException : Exception
+        {
+            public CanceledException(Exception innerException) : base("Connection canceled exception", innerException) { }
+        }
 
         private const float RECONNECTION_DELAY_SECONDS = 5f;
 
@@ -57,7 +67,7 @@ namespace Pixie.Unity
         private ConcurrentQueue<Action> mainThreadActionQueue = new ConcurrentQueue<Action>();
         private PXLLProtocol pllpProtocol = new PXLLProtocol();
         private CancellationTokenSource destroyCancelationTokenSource = new CancellationTokenSource();
-        private Type protocolType;
+        private Type protocolType = null;
 
         public string ClientId { get; private set; } = null;
 
@@ -93,32 +103,45 @@ namespace Pixie.Unity
             await StartDataStreamPreparing();
         }
 
-        public void Disconnect() {
-            ResetProtocol();
+        public void Stop() {
+            if (socketConnection == null) {
+                return;
+            }
 
             socketConnection?.Close();
             socketConnection = null;
+
+            ResetProtocol();
 
             OnDispose();
 
             OnDisposed.Invoke();
         }
 
-        private void ResetProtocol() {
+        private void ResetProtocol() {            
             if (this.protocol != null) {
                 this.protocol.Dispose();
                 GameObject.Destroy(this.protocol);
             }
 
+            if (protocolType == null) {
+                //it probably means we're cleaning everything up
+                return;
+            }
+
             protocol = this.gameObject.AddComponent(protocolType) as PXProtocolBase;
             protocol.Initialize(this);
+
+            async void StartReading() {
+                await WrapProtocolExceptions(async delegate {
+                    await this.protocol.StartReading();
+                });
+            }
+
             StartReading();
         }
 
         protected virtual void OnDispose() {
-        }
-
-        protected virtual void OnConnectionFail() {
         }
 
         private void FixedUpdate() {
@@ -128,6 +151,9 @@ namespace Pixie.Unity
         }
 
         private void OnDestroy() {
+            //making it to signal that we don't wonna recreate protocol
+            protocolType = null;
+
             this.protocol.Dispose();
             this.socketConnection?.Close();
 
@@ -136,21 +162,25 @@ namespace Pixie.Unity
 
         private async Task StartDataStreamPreparing() {
             try {
-                while (!await PrepareDataStream()) {
-                    OnConnectionFail();
+                while (true) {
+                    try {
+                        await PrepareDataStream();
 
-                    if (!repeatConnectionAttempts) {
-                        break;
+                        return;
+                    } catch (ConnectionException) {
+                        if (repeatConnectionAttempts) {
+                            await Task.Delay(TimeSpan.FromSeconds(RECONNECTION_DELAY_SECONDS), destroyCancelationTokenSource.Token);
+                        } else {
+                            throw;
+                        }
                     }
-
-                    await Task.Delay(TimeSpan.FromSeconds(RECONNECTION_DELAY_SECONDS), destroyCancelationTokenSource.Token);
                 }
             } catch (TaskCanceledException) {
                 //object destroyed
             }
         }
 
-        private async Task<bool> PrepareDataStream() {
+        private async Task PrepareDataStream() {
             try {
                 socketConnection = new TcpClient();
 
@@ -175,22 +205,14 @@ namespace Pixie.Unity
                 protocol.SetupStream(new PXExceptionsFilterStream(stream));
 
                 OnConnected.Invoke(isNewConnection);
-
-                return true;
+            } catch (PXLLProtocol.PLLPCanceledException e) {
+                throw new CanceledException(e);
             } catch (Exception e) {
                 socketConnection?.Close();
                 socketConnection = null;
 
-                Debug.LogError(e);
+                throw new ConnectionException(e);
             }
-
-            return false;
-        }
-
-        private async void StartReading() {
-            await WrapProtocolExceptions(async delegate {
-                await this.protocol.StartReading();
-            });
         }
 
         public async void SendMessage(object message) {
@@ -199,15 +221,25 @@ namespace Pixie.Unity
             });
         }
 
-        private async Task WrapProtocolExceptions(Func<Task> action) {
+        private async Task WrapProtocolExceptions(Func<Task> action, bool rethrow = false) {
             try {
                 await action();
-            } catch (PXConnectionFinishedException) {
-                //do nothing
-            } catch (PXConnectionClosedException) {
-                //do nothing
+            } catch (PXConnectionClosedLocalException) {
+                if (rethrow) {
+                    throw;
+                }
+            } catch (PXConnectionClosedRemoteException) {
+                Stop();
+
+                if (rethrow) {
+                    throw;
+                }
             } catch (Exception e) {
                 ClientException(e);
+
+                if (rethrow) {
+                    throw new PXConnectionUnknownErrorException(e);
+                }
             }
         }
 
@@ -237,7 +269,13 @@ namespace Pixie.Unity
         public async Task<R> SendRequestMessage<A, R>(A message) where A : struct where R : struct {
             this.encoder.RegisterMessageTypeIfNotRegistered(typeof(R)); //response type should be registered to be decoded
 
-            return (R)this.encoder.DecodeMessage(await this.protocol.SendRequestMessage(this.encoder.EncodeMessage(message)));
+            R result = default;
+
+            await WrapProtocolExceptions(async delegate {
+                result = (R)this.encoder.DecodeMessage(await this.protocol.SendRequestMessage(this.encoder.EncodeMessage(message)));
+            }, true);
+
+            return result;
         }
 
         public void OnProtocolStateChanged() {
@@ -245,9 +283,13 @@ namespace Pixie.Unity
                 if (reconnect) {
                     OnDisconnected.Invoke();
 
-                    _ = StartDataStreamPreparing();
+                    try {
+                        _ = StartDataStreamPreparing();
+                    } catch (Exception e) {
+                        Debug.LogException(e);
+                    }
                 } else {
-                    Disconnect();
+                    Stop();
                 }
             }
         }

@@ -235,7 +235,7 @@ namespace Pixie.Unity
             this.contact = null;
 
             if (!this.streamReadyTaskSource.Task.IsCompleted) {
-                this.streamReadyTaskSource.SetException(new PXConnectionClosedException());
+                this.streamReadyTaskSource.SetException(new PXConnectionClosedLocalException());
             }
         }
 

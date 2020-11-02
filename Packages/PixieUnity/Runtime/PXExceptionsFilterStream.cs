@@ -44,7 +44,7 @@ namespace Pixie.Unity
                 var bytesRead = await this.innerStream.ReadAsync(buffer, offset, count, cancellationToken);
 
                 if (bytesRead == 0) {
-                    throw new PXConnectionFinishedException();
+                    throw new PXConnectionClosedRemoteException();
                 }
 
                 return bytesRead;
@@ -96,22 +96,11 @@ namespace Pixie.Unity
         private async Task WrapStreamActionOperation(Func<Task> action) {
             try {
                 await action();
-            } catch (SocketException) {
-                //almost any socket exception means
-                //connection loosing for us
-                ThrowLostOrClosed();
             } catch (ObjectDisposedException) {
-                //network stream seems to be closed, so we get this error,
-                //we excpect it, so do nothing
-                ThrowLostOrClosed();
+                throw new PXConnectionClosedLocalException();
             } catch (IOException) {
-                //that happens sometimes, if user closes connection
-                ThrowLostOrClosed();
+                throw new PXConnectionLostException();
             }
-        }
-
-        private void ThrowLostOrClosed() {
-            throw new PXConnectionLostException();
         }
     }
 }
