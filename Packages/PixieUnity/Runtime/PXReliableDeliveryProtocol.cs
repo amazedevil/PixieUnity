@@ -70,7 +70,7 @@ namespace Pixie.Unity
         }
 
         private IPXProtocolContact contact;
-        private PXProtocolState state = PXProtocolState.None;
+        private volatile PXProtocolState state = PXProtocolState.None;
 
         private IDictionary<ushort, MessageData> messages = new ConcurrentDictionary<ushort, MessageData>();
         private IDictionary<ushort, MessageProcessedData> processing = new ConcurrentDictionary<ushort, MessageProcessedData>();
@@ -92,8 +92,10 @@ namespace Pixie.Unity
         }
 
         public override void SetupStream(Stream stream) {
-            state = PXProtocolState.Working;
-            streamReadyTaskSource.SetResult(stream);
+            lock (this) {
+                state = PXProtocolState.Working;
+                streamReadyTaskSource.SetResult(stream);
+            }
         }
 
         public override async Task<byte[]> SendRequestMessage(byte[] message) {
@@ -129,8 +131,8 @@ namespace Pixie.Unity
                             }
                             break;
                     }
-                } catch (PXConnectionLostException) {
-                    ReportOnConnectionLost();
+                } catch (PXConnectionLostException e) {
+                    ReportOnConnectionLost(e.ConnectionStream);
                 }
 
                 RemoveOutdatedProcessing();
@@ -201,8 +203,8 @@ namespace Pixie.Unity
                 writer.Write(message.data.Length);
                 writer.Write(message.data);
                 await writer.FlushAsync();
-            } catch (PXConnectionLostException) {
-                ReportOnConnectionLost();
+            } catch (PXConnectionLostException e) {
+                ReportOnConnectionLost(e.ConnectionStream);
 
                 await SendMessageInternal(message);
             }
@@ -220,8 +222,8 @@ namespace Pixie.Unity
                 writer.Write(response.Length);
                 writer.Write(response);
                 await writer.FlushAsync();
-            } catch (PXConnectionLostException) {
-                ReportOnConnectionLost();
+            } catch (PXConnectionLostException e) {
+                ReportOnConnectionLost(e.ConnectionStream);
 
                 await SendResponse(messageId, response);
             }
@@ -262,25 +264,30 @@ namespace Pixie.Unity
                 writer.Write(MESSAGE_TYPE_ACK);
                 writer.Write(id);
                 await writer.FlushAsync();
-            } catch (PXConnectionLostException) {
-                ReportOnConnectionLost();
+            } catch (PXConnectionLostException e) {
+                ReportOnConnectionLost(e.ConnectionStream);
 
                 await SendAckMessage(id);
             }
         }
 
-        private void ReportOnConnectionLost() {
+        private void ReportOnConnectionLost(Stream connectionStream) {
             lock (this) {
                 if (state == PXProtocolState.WaitingForConnection) {
                     return;
                 }
 
                 if (!this.streamReadyTaskSource.Task.IsCompleted) {
-                    this.streamReadyTaskSource.SetException(new PXConnectionLostException());
+                    this.streamReadyTaskSource.SetException(new PXConnectionLostException(connectionStream));
+                } else if (!ReferenceEquals(this.streamReadyTaskSource.Task.Result, connectionStream)) {
+                    //possibly it's some new stream, so
+                    //don't wait for new connection, just try with current
+                    return;
                 }
 
                 this.streamReadyTaskSource = new TaskCompletionSource<Stream>();
                 state = PXProtocolState.WaitingForConnection;
+
                 Task.Run(delegate { contact.OnProtocolStateChanged(); });
             }
         }

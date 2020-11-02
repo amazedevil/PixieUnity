@@ -108,7 +108,7 @@ namespace Pixie.Unity
                 return;
             }
 
-            socketConnection?.Close();
+            socketConnection.Close();
             socketConnection = null;
 
             ResetProtocol();
@@ -154,8 +154,8 @@ namespace Pixie.Unity
             //making it to signal that we don't wonna recreate protocol
             protocolType = null;
 
-            this.protocol.Dispose();
             this.socketConnection?.Close();
+            ResetProtocol();
 
             destroyCancelationTokenSource.Cancel();
         }
