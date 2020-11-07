@@ -239,6 +239,10 @@ namespace Pixie.Unity
             if (!this.streamReadyTaskSource.Task.IsCompleted) {
                 this.streamReadyTaskSource.SetException(new PXConnectionClosedLocalException());
             }
+
+            foreach (var message in this.messages) {
+                message.Value.responseWaiter.SetException(new PXConnectionClosedLocalException());
+            }
         }
 
         private async Task<ushort> SendMessageInternal(byte[] message, bool isRequest) {
