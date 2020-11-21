@@ -9,14 +9,14 @@ namespace Pixie.Unity
 {
     public class PXLLProtocol
     {
-        public class PLLPVersionIncorrectException : Exception { }
-        public class PLLPUknownException : Exception 
+        public class PLLPException : Exception {
+            public PLLPException(string message, Exception e) : base(message, e) {  }
+            public PLLPException() : base() { }
+        }
+        public class PLLPVersionIncorrectException : PLLPException {}
+        public class PLLPUknownException : PLLPException
         {
             public PLLPUknownException(Exception e) : base("Unknown PLLP Exception", e) { }
-        }
-        public class PLLPCanceledException : Exception
-        {
-            public PLLPCanceledException(Exception e) : base("PLLP Canceled Exception", e) { }
         }
 
         private const short PLLP_VERSION = 1;
@@ -26,6 +26,8 @@ namespace Pixie.Unity
 
         public async Task<string> WelcomeFromReceiver(Stream stream) {
             try {
+                stream = new PXExceptionsFilterStream(stream);
+
                 var reader = new PXBinaryReaderAsync(stream);
                 var writer = new PXBinaryWriterAsync(stream);
 
@@ -50,6 +52,10 @@ namespace Pixie.Unity
                 }
 
                 return id.ToString();
+            } catch (PLLPVersionIncorrectException) {
+                throw;
+            } catch (PXConnectionClosedLocalException) {
+                throw;
             } catch (Exception e) {
                 throw new PLLPUknownException(e);
             }
@@ -77,13 +83,10 @@ namespace Pixie.Unity
                     await writer.FlushAsync();
                     return (await reader.ReadGuid()).ToString();
                 }
-            } catch (ObjectDisposedException e) {
-                //That's client code only case, cause
-                //for client we suppose it can interrupt
-                //connection while handshake, for server
-                //it's always treated as connection problem
-
-                throw new PLLPCanceledException(e);
+            } catch (PLLPVersionIncorrectException) {
+                throw;
+            } catch (PXConnectionClosedLocalException) {
+                throw;
             } catch (Exception e) {
                 throw new PLLPUknownException(e);
             }

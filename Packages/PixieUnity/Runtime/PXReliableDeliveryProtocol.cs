@@ -292,7 +292,12 @@ namespace Pixie.Unity
                 this.streamReadyTaskSource = new TaskCompletionSource<Stream>();
                 state = PXProtocolState.WaitingForConnection;
 
-                Task.Run(delegate { contact.OnProtocolStateChanged(); });
+                IEnumerator ReportProtocolStateChange() {
+                    yield return null;
+                    contact.OnProtocolStateChanged();
+                }
+
+                this.StartCoroutine(ReportProtocolStateChange());
             }
         }
     }

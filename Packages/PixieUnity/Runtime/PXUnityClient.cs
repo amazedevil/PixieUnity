@@ -14,17 +14,13 @@ namespace Pixie.Unity
 {
     public class PXUnityClient : MonoBehaviour, IPXProtocolContact
     {
-        [Serializable]
-        public class ConnectedEvent : UnityEvent<bool> { }
-
         public class ConnectionException : Exception
         {
-            public ConnectionException(Exception innerException) : base("Server connection exception", innerException) { }
+            public ConnectionException(Exception e) : base("Initial connection exception", e) { }
         }
-        public class CanceledException : Exception
-        {
-            public CanceledException(Exception innerException) : base("Connection canceled exception", innerException) { }
-        }
+
+        [Serializable]
+        public class ConnectedEvent : UnityEvent<bool> { }
 
         private const float RECONNECTION_DELAY_SECONDS = 5f;
 
@@ -61,7 +57,12 @@ namespace Pixie.Unity
         [SerializeField]
         private ConnectedEvent OnConnected = null;
 
-        private TcpClient socketConnection = null;
+        [SerializeField]
+        private UnityEvent OnConnectionFailedFatal = null;
+
+        private TcpClient connection = null;
+        private PXExceptionsFilterStream exceptionsFilter = null;
+
         private PXUnityMessageEncoder encoder = null;
         private PXUnityMessageHandlerRawBase[] handlers;
         private ConcurrentQueue<Action> mainThreadActionQueue = new ConcurrentQueue<Action>();
@@ -74,7 +75,6 @@ namespace Pixie.Unity
         private void Awake() {
             if (protocol == null) {
                 protocolType = typeof(PXReliableDeliveryProtocol);
-                ResetProtocol();
             } else {
                 protocolType = protocol.GetType();
             }
@@ -94,42 +94,111 @@ namespace Pixie.Unity
 
             this.encoder = new PXUnityMessageEncoder(handlers.Select(x => x.DataType).ToArray());
 
+            if (protocol != null) {
+                ProtocolInitialize();
+            }
+
             if (autoConnectOnAwake) {
                 _ = Connect();
             }
         }
 
         public async Task Connect() {
-            await StartDataStreamPreparing();
+            try {
+                while (true) {
+                    try {
+                        if (connection != null) {
+                            //we suppose that if we change connection to new,
+                            //something went wrong with previous one
+                            exceptionsFilter?.SwitchToErrorState();
+                            exceptionsFilter = null;
+                            connection.Close();
+                        }
+
+                        connection = new TcpClient();
+
+                        IPAddress address = new Func<IPAddress>(() => {
+                            try {
+                                return IPAddress.Parse(serverHost);
+                            } catch (FormatException) {
+                                return Dns.GetHostEntry(serverHost)
+                                    .AddressList
+                                    .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+                            }
+                        })();
+
+                        Task ConnectAsyncFixed(IPAddress aAddress, int aPort, TcpClient aClient) {
+                            void EndConnectFixed(IAsyncResult asyncResult) {
+                                if (aClient.Client != null) {
+                                    aClient.EndConnect(asyncResult); //TODO: process socket exception
+                                } else {
+                                    throw new ObjectDisposedException(aClient.GetType().FullName);
+                                }
+                            }
+
+                            return Task.Factory.FromAsync(aClient.BeginConnect, EndConnectFixed, aAddress, aPort, null);
+                        }
+
+                        try {
+                            await ConnectAsyncFixed(address, serverPort, connection);
+                        } catch (SocketException e) {
+                            throw new ConnectionException(e);
+                        }
+
+                        //TODO: make ssl support
+                        var stream = new PXExceptionsFilterStream(connection.GetStream());
+
+                        var isNewConnection = ClientId != null;
+
+                        ClientId = await pllpProtocol.WelcomeFromSender(stream, ClientId);
+
+                        //initializing new protocol
+                        if (this == null) { //check if has been destroyed meanwhile
+                            return;
+                        }
+
+                        if (protocol == null) {
+                            protocol = this.gameObject.AddComponent(protocolType) as PXProtocolBase;
+                            ProtocolInitialize();
+                        }
+
+                        protocol.SetupStream(exceptionsFilter = stream);
+
+                        OnConnected.Invoke(isNewConnection);
+
+                        return;
+                    } catch (Exception e) {
+                        if (repeatConnectionAttempts) {
+                            Debug.LogException(e);
+
+                            await Task.Delay(TimeSpan.FromSeconds(RECONNECTION_DELAY_SECONDS), destroyCancelationTokenSource.Token);
+                        } else {
+                            throw;
+                        }
+                    }
+                }
+            } catch (TaskCanceledException) {
+                //object destroyed
+            }
         }
 
         public void Stop() {
-            if (socketConnection == null) {
+            if (connection == null) {
                 return;
             }
 
-            socketConnection.Close();
-            socketConnection = null;
+            Debug.Log("Stopping Pixie client");
+
+            connection.Close();
+            connection = null;
 
             ResetProtocol();
 
             OnDispose();
-
             OnDisposed.Invoke();
         }
 
-        private void ResetProtocol() {            
-            if (this.protocol != null) {
-                this.protocol.Dispose();
-                GameObject.Destroy(this.protocol);
-            }
-
-            if (protocolType == null) {
-                //it probably means we're cleaning everything up
-                return;
-            }
-
-            protocol = this.gameObject.AddComponent(protocolType) as PXProtocolBase;
+        private void ProtocolInitialize() {
             protocol.Initialize(this);
 
             async void StartReading() {
@@ -139,6 +208,15 @@ namespace Pixie.Unity
             }
 
             StartReading();
+        }
+
+        private void ResetProtocol() {            
+            if (this.protocol != null) {
+                this.protocol.Dispose();
+                GameObject.Destroy(this.protocol);
+                this.protocol = null;
+                this.ClientId = null;
+            }
         }
 
         protected virtual void OnDispose() {
@@ -151,73 +229,15 @@ namespace Pixie.Unity
         }
 
         private void OnDestroy() {
-            //making it to signal that we don't wonna recreate protocol
-            protocolType = null;
-
-            this.socketConnection?.Close();
+            this.connection?.Close();
             ResetProtocol();
 
             destroyCancelationTokenSource.Cancel();
         }
 
-        private async Task StartDataStreamPreparing() {
-            try {
-                while (true) {
-                    try {
-                        await PrepareDataStream();
-
-                        return;
-                    } catch (ConnectionException) {
-                        if (repeatConnectionAttempts) {
-                            await Task.Delay(TimeSpan.FromSeconds(RECONNECTION_DELAY_SECONDS), destroyCancelationTokenSource.Token);
-                        } else {
-                            throw;
-                        }
-                    }
-                }
-            } catch (TaskCanceledException) {
-                //object destroyed
-            }
-        }
-
-        private async Task PrepareDataStream() {
-            try {
-                socketConnection = new TcpClient();
-
-                IPAddress address = null;
-
-                try {
-                    address = IPAddress.Parse(serverHost);
-                } catch (FormatException) {
-                    address = Dns.GetHostEntry(serverHost)
-                        .AddressList
-                        .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
-                }
-
-                await socketConnection.ConnectAsync(address, serverPort);
-
-                var stream = socketConnection.GetStream();
-
-                var isNewConnection = ClientId != null;
-
-                ClientId = await pllpProtocol.WelcomeFromSender(stream, ClientId);
-
-                protocol.SetupStream(new PXExceptionsFilterStream(stream));
-
-                OnConnected.Invoke(isNewConnection);
-            } catch (PXLLProtocol.PLLPCanceledException e) {
-                throw new CanceledException(e);
-            } catch (Exception e) {
-                socketConnection?.Close();
-                socketConnection = null;
-
-                throw new ConnectionException(e);
-            }
-        }
-
         public async void SendMessage(object message) {
             await WrapProtocolExceptions(async delegate {
-                await this.protocol.SendMessage(encoder.EncodeMessage(message));
+                await (this.protocol ?? throw new PXConnectionClosedLocalException()).SendMessage(encoder.EncodeMessage(message));
             });
         }
 
@@ -235,7 +255,7 @@ namespace Pixie.Unity
                     throw;
                 }
             } catch (Exception e) {
-                ClientException(e);
+                Debug.LogException(e);
 
                 if (rethrow) {
                     throw new PXConnectionUnknownErrorException(e);
@@ -243,7 +263,7 @@ namespace Pixie.Unity
             }
         }
 
-        private void ProcessCommand(object message) {
+        private void ProcessMessage(object message) {
             var messageType = message.GetType();
 
             Debug.Log("Message received: " + messageType.ToString());
@@ -255,15 +275,21 @@ namespace Pixie.Unity
             }
         }
 
+        private object ProcessRequest(object message) {
+            //TODO: make processing of requests from server to client
+            throw new NotImplementedException();
+        }
+
         public void ReceivedMessage(byte[] message) {
-            var decoded = this.encoder.DecodeMessage(message);
-            mainThreadActionQueue.Enqueue(delegate {
-                ProcessCommand(decoded);
-            });
+            ProcessMessage(this.encoder.DecodeMessage(message));
         }
 
         public void ReceivedRequestMessage(ushort id, byte[] message) {
-            this.protocol.SendResponse(id, message);
+            _ = WrapProtocolExceptions(async delegate {
+                await this.protocol?.SendResponse(id, this.encoder.EncodeMessage(
+                    ProcessRequest(this.encoder.DecodeMessage(message))
+                ));
+            });
         }
 
         public async Task<R> SendRequestMessage<A, R>(A message) where A : struct where R : struct {
@@ -272,7 +298,10 @@ namespace Pixie.Unity
             R result = default;
 
             await WrapProtocolExceptions(async delegate {
-                result = (R)this.encoder.DecodeMessage(await this.protocol.SendRequestMessage(this.encoder.EncodeMessage(message)));
+                result = (R)this.encoder.DecodeMessage(
+                    await (this.protocol ?? throw new PXConnectionClosedLocalException())
+                        .SendRequestMessage(this.encoder.EncodeMessage(message))
+                );
             }, true);
 
             return result;
@@ -280,24 +309,26 @@ namespace Pixie.Unity
 
         public void OnProtocolStateChanged() {
             if (this.protocol.GetState() == PXProtocolState.WaitingForConnection) {
+                this.exceptionsFilter.SwitchToErrorState();
+
                 if (reconnect) {
                     OnDisconnected.Invoke();
 
-                    try {
-                        _ = StartDataStreamPreparing();
-                    } catch (Exception e) {
-                        Debug.LogException(e);
+                    async void Reconnect() {
+                        try {
+                            await Connect();
+                        } catch (Exception e) {
+                            Debug.LogException(e);
+                        }
                     }
+
+                    Reconnect();
                 } else {
+                    OnConnectionFailedFatal.Invoke();
+
                     Stop();
                 }
             }
-        }
-
-        public void ClientException(Exception e) {
-            mainThreadActionQueue.Enqueue(delegate {
-                Debug.LogError(e);
-            });
         }
     }
 }
