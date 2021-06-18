@@ -72,6 +72,10 @@ namespace Pixie.Unity
 
         public string ClientId { get; private set; } = null;
 
+        protected virtual string ServerHost => serverHost;
+
+        protected virtual int ServerPort => serverPort;
+
         private void Awake() {
             if (protocol == null) {
                 protocolType = typeof(PXReliableDeliveryProtocol);
@@ -119,9 +123,9 @@ namespace Pixie.Unity
 
                         IPAddress address = new Func<IPAddress>(() => {
                             try {
-                                return IPAddress.Parse(serverHost);
+                                return IPAddress.Parse(ServerHost);
                             } catch (FormatException) {
-                                return Dns.GetHostEntry(serverHost)
+                                return Dns.GetHostEntry(ServerHost)
                                     .AddressList
                                     .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
                             }
@@ -140,7 +144,7 @@ namespace Pixie.Unity
                         }
 
                         try {
-                            await ConnectAsyncFixed(address, serverPort, connection);
+                            await ConnectAsyncFixed(address, ServerPort, connection);
                         } catch (SocketException e) {
                             throw new ConnectionException(e);
                         }
